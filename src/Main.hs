@@ -2,64 +2,111 @@
 
 module Main where
 
-import SDL
+import qualified SDL
 import Control.Monad
 import qualified Linear as L
 import Data.Array.Storable
 import Foreign.Ptr
+import Foreign.Storable (poke)
 import qualified Foreign.Marshal.Array as M
 import Foreign.C.Types
+import Data.Bits
 
+-- | Standard window width and height
 width, height :: Num a => a
 width = 800
 height = 600
 
--- Renders to the given array
+-- | Renders to the given array
 render :: Ptr CUInt -> IO ()
-render = undefined
+render buf = forM_ [0..height-1] $ \y -> do 
+  forM_ [0..width-1] $ \x -> do 
+    let white = CUInt 0xFFFFFFFF
+    let idx = width * y + x
+    let pix = plusPtr buf (idx*4)
+    let col = CUInt . fromIntegral $ x * y
+    poke pix col
 
--- Uploads the given array to a texture
-upload :: Texture -> Int -> Int -> Ptr CUInt -> IO ()
+-- | Uploads the given array to a texture
+upload :: SDL.Texture -> Int -> Int -> Ptr CUInt -> IO ()
 upload texture width height source = do
-  (lockedPtr, pitch) <- lockTexture texture Nothing
+  (lockedPtr, pitch) <- SDL.lockTexture texture Nothing
   let dest = castPtr lockedPtr :: Ptr CUInt
-  M.copyArray source dest (width * height * 4)
+  M.copyArray dest source (width * height)
+  SDL.unlockTexture texture
 
-main :: IO ()
-main = do
+-- | Create a window and run the given IO action
+withWindow :: (SDL.Window -> SDL.Renderer -> IO ()) -> IO ()
+withWindow action = do
   -- Initialise all SDL subsystems
-  initializeAll
+  SDL.initializeAll
 
   -- Create SDL window
-  window <- createWindow "blue sky" defaultWindow { windowInitialSize = L.V2 width height }
-  renderer <- createRenderer window (-1) defaultRenderer
-  texture <- createTexture renderer RGBA8888 TextureAccessStreaming (L.V2 width height)
+  window <- SDL.createWindow "boop" SDL.defaultWindow { SDL.windowInitialSize = L.V2 width height }
+  renderer <- SDL.createRenderer window (-1) SDL.defaultRenderer
+
+  -- Do user action
+  action window renderer
+
+  -- Clean up
+  SDL.destroyRenderer renderer
+  SDL.destroyWindow window
+
+-- | Timing info
+data TimingInfo = TimingInfo
+  { time :: Float -- ^ The current time
+  , frames :: Int -- ^ Frames that have passed
+  , lastFpsUpdate :: Float -- ^ Last time the FPS was updated
+  , fps :: Int -- ^ FPS at that time
+  }
+
+-- | Update timing
+updateTiming :: TimingInfo -> Float -> TimingInfo
+updateTiming timingInfo newTime =
+  if newTime - lastFpsUpdate timingInfo >= 1.0
+    then timingInfo { time = newTime, lastFpsUpdate = newTime, fps = frames timingInfo, frames = 0 }
+    else timingInfo { time = newTime, frames = frames timingInfo + 1 }
+
+-- | Main stuff
+main :: IO ()
+main = withWindow $ \window renderer -> do
+  -- Create texture
+  texture <- SDL.createTexture renderer SDL.RGBA8888 SDL.TextureAccessStreaming (L.V2 width height)
 
   -- Create pixel buffer
-  pixelBuffer <- newArray (width, height) 0 :: IO (StorableArray Int CUInt)
+  pixelBuffer <- newArray (0, width * height - 1) 0 :: IO (StorableArray Int CUInt)
 
   -- Render image
-  --withStorableArray pixelBuffer render
+  withStorableArray pixelBuffer render
+
+  pix <- readArray pixelBuffer (50 * width + 50)
+  putStrLn $ "pixel value: " ++ show pix
 
   -- Main loop
-  let loop = do
+  let loop timingInfo = do
         -- Poll window events so it doesn't just freeze up
-        pollEvents
+        SDL.pollEvents
 
         -- Draw window
         withStorableArray pixelBuffer (upload texture width height)
 
+        SDL.copy renderer texture Nothing Nothing
+
         -- Present image
-        present renderer
+        SDL.present renderer
 
-        -- loop until esc is pressed
-        keyState <- getKeyboardState
-        
-        unless (keyState ScancodeEscape) loop
+        -- Update timing info
+        newTimingInfo <- updateTiming timingInfo <$> SDL.time
 
-  loop
+        -- Print fps if changed
+        when (lastFpsUpdate timingInfo /= lastFpsUpdate newTimingInfo) $
+          putStrLn $ "FPS: " ++ show (fps newTimingInfo)
 
-  -- Clean up
-  destroyTexture texture
-  destroyRenderer renderer
-  destroyWindow window
+        -- Loop until esc is pressed
+        keyState <- SDL.getKeyboardState
+        unless (keyState SDL.ScancodeEscape) (loop newTimingInfo)
+
+  time <- SDL.time
+  loop (TimingInfo time 0 time 0)
+
+  SDL.destroyTexture texture
